@@ -13,7 +13,7 @@ constexpr int MAX_GRAINS = 48;
 
 struct Grain {
     bool active = false;
-    float lag = 1.f;           // samples behind the write head
+    float lag = 1.f;
     float age = 0.f;
     float duration = 1.f;
     float randomRate = 1.f;    // fixed per-grain pitch offset as a rate ratio
@@ -33,11 +33,6 @@ struct Randomizer {
 inline float limited(float v, float lo, float hi) {
     return rack::math::clamp(v, lo, hi);
 }
-
-// Maps a knob position p in [0, 1] to a value in [lo, hi].
-// Measured from Ableton's Grain Delay: Frequency is logarithmic, Spray and Rand Pitch
-// are quadratic. Pitch is piecewise linear with 0 at the knob's centre, and grain size
-// is exponential so that the centre is x1.
 struct Curve {
     enum Kind { QUADRATIC, LOGARITHMIC, CENTERED };
     float lo, hi;
@@ -65,8 +60,6 @@ constexpr Curve FREQ_CURVE{1.f, 150.f, Curve::LOGARITHMIC};
 constexpr Curve PITCH_CURVE{-36.f, 12.f, Curve::CENTERED};
 constexpr Curve SIZE_CURVE{0.25f, 4.f, Curve::LOGARITHMIC};
 constexpr Curve RAND_CURVE{0.f, 6.f, Curve::QUADRATIC};
-
-// Knob readouts show at most three decimals, without trailing zeros.
 struct ThreeDecimalQuantity : ParamQuantity {
     std::string getDisplayValueString() override {
         char text[32];
@@ -77,8 +70,6 @@ struct ThreeDecimalQuantity : ParamQuantity {
         return out == "-0" ? "0" : out;
     }
 };
-
-// The stored param is the 0..1 knob position; the displayed value follows the curve.
 struct CurvedQuantity : ThreeDecimalQuantity {
     Curve curve{0.f, 1.f, Curve::QUADRATIC};
     float getDisplayValue() override { return curve.toValue(getValue()); }
@@ -87,13 +78,11 @@ struct CurvedQuantity : ThreeDecimalQuantity {
 } // namespace
 
 struct Daisy : Module {
-    // The eight parameter IDs are deliberately unchanged to preserve existing patches.
     enum ParamId {
         DELAY_PARAM, SPRAY_PARAM, FREQ_PARAM, PITCH_PARAM,
         RAND_PARAM, SIZE_PARAM, FEED_PARAM, MIX_PARAM,
         PARAMS_LEN
     };
-    // Input 0 is the original mono input, now interpreted as L/mono.
     enum InputId {
         IN_L_INPUT,
         IN_R_INPUT,
@@ -101,42 +90,41 @@ struct Daisy : Module {
         RAND_CV_INPUT, SIZE_CV_INPUT, FEED_CV_INPUT, MIX_CV_INPUT,
         INPUTS_LEN
     };
-    // Output 0 remains the original output, now L.
     enum OutputId { OUT_L_OUTPUT, OUT_R_OUTPUT, OUTPUTS_LEN };
     enum LightId { LIGHTS_LEN };
 
-    // Independent left and right delay tapes. Grain triggers and random choices
-    // are shared so stereo transients retain their relative timing and pitch.
     std::array<std::vector<float>, 2> tape;
-    std::array<Grain, MAX_GRAINS> grains{};
-    Randomizer rng;
+    std::array<std::array<Grain, MAX_GRAINS>, 2> grains{};
+    std::array<Randomizer, 2> rng{};
     uint32_t writePos = 0;
-    float samplesToNext = 0.f;
+    std::array<float, 2> samplesToNext{};
+    bool staggerRight = true;
     std::array<float, 2> lastWet{};
     float smoothFeedback = 0.f;
-    float smoothMix = 1.f;
+    float smoothMix = 0.5f;
     float smoothPitch = 0.f;
     float lastSampleRate = 0.f;
 
     Daisy() {
         for (auto& t : tape) t.resize(BUFFER_SIZE, 0.f);
+        rng[1].state = 0x85ebca6bu;
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
-        configParam<ThreeDecimalQuantity>(DELAY_PARAM, 0.f, 1000.f, 0.f, "Delay time", " ms");
-        configCurved(SPRAY_PARAM, SPRAY_CURVE, 0.f, "Spray", " ms");
-        configCurved(FREQ_PARAM, FREQ_CURVE, 60.f, "Grain frequency", " Hz");
-        configCurved(PITCH_PARAM, PITCH_CURVE, 0.f, "Pitch", " semitones");
-        configCurved(RAND_PARAM, RAND_CURVE, 0.f, "Random pitch", " semitones");
-        configCurved(SIZE_PARAM, SIZE_CURVE, 1.f, "Grain size", " x period");
-        configParam<ThreeDecimalQuantity>(FEED_PARAM, 0.f, 0.95f, 0.f, "Feedback", " %", 0.f, 100.f);
-        configParam<ThreeDecimalQuantity>(MIX_PARAM, 0.f, 1.f, 1.f, "Dry / wet", " %", 0.f, 100.f);
+        configParam<ThreeDecimalQuantity>(DELAY_PARAM, 0.f, 1000.f, 0.f, "delay time", " ms");
+        configCurved(SPRAY_PARAM, SPRAY_CURVE, 0.f, "spray", " ms");
+        configCurved(FREQ_PARAM, FREQ_CURVE, 60.f, "frequency", " Hz");
+        configCurved(PITCH_PARAM, PITCH_CURVE, 0.f, "pitch", " semitones");
+        configCurved(RAND_PARAM, RAND_CURVE, 0.f, "random pitch", " semitones");
+        configCurved(SIZE_PARAM, SIZE_CURVE, 1.f, "grain size", " x period");
+        configParam<ThreeDecimalQuantity>(FEED_PARAM, 0.f, 0.95f, 0.f, "feedback", " %", 0.f, 100.f);
+        configParam<ThreeDecimalQuantity>(MIX_PARAM, 0.f, 1.f, 0.5f, "dry / wet", " %", 0.f, 100.f);
 
-        configInput(IN_L_INPUT, "Left / mono audio");
-        configInput(IN_R_INPUT, "Right audio (normalled to left)");
-        const char* cvNames[] = {"Delay time CV", "Spray CV", "Frequency CV", "Pitch CV (1 V/oct)",
-                                 "Random pitch CV", "Grain size CV", "Feedback CV", "Dry / wet CV"};
+        configInput(IN_L_INPUT, "left / mono input");
+        configInput(IN_R_INPUT, "right input");
+        const char* cvNames[] = {"delay time CV", "spray CV", "frequency CV", "pitch CV",
+                                 "random pitch CV", "grain size CV", "feedback CV", "dry / wet CV"};
         for (int i = 0; i < 8; ++i) configInput(DELAY_CV_INPUT + i, cvNames[i]);
-        configOutput(OUT_L_OUTPUT, "Left audio");
-        configOutput(OUT_R_OUTPUT, "Right audio");
+        configOutput(OUT_L_OUTPUT, "left output");
+        configOutput(OUT_R_OUTPUT, "right output");
         configBypass(IN_L_INPUT, OUT_L_OUTPUT);
         configBypass(IN_R_INPUT, OUT_R_OUTPUT);
         onReset();
@@ -150,23 +138,22 @@ struct Daisy : Module {
 
     void onReset() override {
         for (auto& t : tape) std::fill(t.begin(), t.end(), 0.f);
-        for (auto& g : grains) g = Grain{};
+        for (auto& pool : grains) for (auto& g : pool) g = Grain{};
         writePos = 0;
-        samplesToNext = 0.f;
+        samplesToNext = {{0.f, 0.f}};
+        staggerRight = true;
         lastWet = {{0.f, 0.f}};
         smoothFeedback = params[FEED_PARAM].getValue();
         smoothMix = params[MIX_PARAM].getValue();
         smoothPitch = PITCH_CURVE.toValue(params[PITCH_PARAM].getValue());
     }
 
-    // Most controls use +/-5 V for +/-50% of the control's total travel.
     float setting(int paramId, int cvId, float lo, float hi) {
         float value = params[paramId].getValue();
         if (inputs[cvId].isConnected()) value += inputs[cvId].getVoltage() * (hi - lo) * 0.1f;
         return limited(value, lo, hi);
     }
 
-    // CV moves the knob position, so it follows the same curve as turning the knob.
     float curvedSetting(int paramId, int cvId, const Curve& curve) {
         float position = params[paramId].getValue();
         if (inputs[cvId].isConnected()) position += inputs[cvId].getVoltage() * 0.1f;
@@ -176,29 +163,27 @@ struct Daisy : Module {
     float readTape(int channel, float position) const {
         float base = std::floor(position);
         float frac = position - base;
-        // Keep indices within bounds even when grain position is negative.
         int i0 = static_cast<int>(base) & (BUFFER_SIZE - 1);
         int i1 = (i0 + 1) & (BUFFER_SIZE - 1);
         const auto& t = tape[channel];
         return t[i0] + frac * (t[i1] - t[i0]);
     }
 
-    // Prevent extreme modulation from producing non-useful ratios.
     static float semitonesToRate(float semitones) {
         return std::pow(2.f, limited(semitones, -72.f, 48.f) / 12.f);
     }
 
-    void spawn(float sr, float duration, float delaySamples, float sprayMs,
+    void spawn(int ch, float sr, float duration, float delaySamples, float sprayMs,
                float pitchSemitones, float randomPitchSemitones) {
         Grain* target = nullptr;
-        for (auto& g : grains) {
+        for (auto& g : grains[ch]) {
             if (!g.active) { target = &g; break; }
         }
         if (!target) return;
 
-        float randomPitch = rng.bipolar() * randomPitchSemitones;
+        float randomPitch = rng[ch].bipolar() * randomPitchSemitones;
         float rate = semitonesToRate(pitchSemitones + randomPitch);
-        float jitter = rng.bipolar() * sprayMs * 0.001f * sr;
+        float jitter = rng[ch].bipolar() * sprayMs * 0.001f * sr;
         float actualDelay = std::max(1.f, delaySamples + jitter);
         float safety = duration * std::max(0.f, rate - 1.f) + 2.f;
 
@@ -216,7 +201,6 @@ struct Daisy : Module {
             lastSampleRate = sr;
         }
         const float dryL = inputs[IN_L_INPUT].getVoltage();
-        // An unpatched right jack uses the left signal (mono -> dual mono).
         const float dryR = inputs[IN_R_INPUT].isConnected()
             ? inputs[IN_R_INPUT].getVoltage() : dryL;
         const float dry[2] = {dryL, dryR};
@@ -224,7 +208,6 @@ struct Daisy : Module {
         const float delay = setting(DELAY_PARAM, DELAY_CV_INPUT, 0.f, 1000.f);
         const float spray = curvedSetting(SPRAY_PARAM, SPRAY_CV_INPUT, SPRAY_CURVE);
         const float freq = curvedSetting(FREQ_PARAM, FREQ_CV_INPUT, FREQ_CURVE);
-        // Pitch CV is 1 V/oct (12 semitones per volt) on top of the knob's pitch.
         float pitch = PITCH_CURVE.toValue(params[PITCH_PARAM].getValue());
         if (inputs[PITCH_CV_INPUT].isConnected()) pitch += inputs[PITCH_CV_INPUT].getVoltage() * 12.f;
         pitch = limited(pitch, PITCH_CURVE.lo, PITCH_CURVE.hi);
@@ -233,8 +216,7 @@ struct Daisy : Module {
         const float feedback = setting(FEED_PARAM, FEED_CV_INPUT, 0.f, 0.95f);
         const float mix = setting(MIX_PARAM, MIX_CV_INPUT, 0.f, 1.f);
 
-        const float smooth = std::min(1.f, 200.f / sr); // ~5 ms smoothing
-        // Grains follow the current pitch every sample, so sweeping Pitch is glide-smooth.
+        const float smooth = std::min(1.f, 200.f / sr); // about 5 ms smoothing
         smoothPitch += std::min(1.f, 100.f / sr) * (pitch - smoothPitch);
         const float pitchRate = semitonesToRate(smoothPitch);
         smoothFeedback += smooth * (feedback - smoothFeedback);
@@ -246,31 +228,34 @@ struct Daisy : Module {
         const float period = sr / freq;
         const float duration = std::max(8.f, std::min(sr * 2.f, period * size));
         const float delaySamples = sr * delay * 0.001f;
-        samplesToNext -= 1.f;
-        if (samplesToNext <= 0.f) {
-            spawn(sr, duration, delaySamples, spray, pitch, randPitch);
-            samplesToNext += std::max(1.f, 0.5f * period);
+        const float hop = std::max(1.f, 0.5f * period);
+        if (staggerRight) {
+            samplesToNext[1] = 0.5f * hop;
+            staggerRight = false;
         }
 
-        float wet[2] = {0.f, 0.f};
-        float windowSum = 0.f;
-        for (auto& g : grains) {
-            if (!g.active) continue;
-            const float phase = g.age / g.duration;
-            if (phase >= 1.f) { g.active = false; continue; }
-            const float window = 0.5f - 0.5f * std::cos(2.f * PI * phase);
-            const float position = static_cast<float>(writePos) - g.lag;
-            wet[0] += readTape(0, position) * window;
-            wet[1] += readTape(1, position) * window;
-            windowSum += window;
-            // A grain can't read ahead of the write head, so its lag stops at one sample.
-            g.lag = std::max(1.f, g.lag + 1.f - pitchRate * g.randomRate);
-            g.age += 1.f;
-        }
         for (int ch = 0; ch < 2; ++ch) {
-            if (windowSum > 1e-5f) wet[ch] /= windowSum;
-            lastWet[ch] = limited(wet[ch], -20.f, 20.f);
-            const float result = dry[ch] * (1.f - smoothMix) + wet[ch] * smoothMix;
+            samplesToNext[ch] -= 1.f;
+            if (samplesToNext[ch] <= 0.f) {
+                spawn(ch, sr, duration, delaySamples, spray, pitch, randPitch);
+                samplesToNext[ch] += hop;
+            }
+
+            float wet = 0.f;
+            float windowSum = 0.f;
+            for (auto& g : grains[ch]) {
+                if (!g.active) continue;
+                const float phase = g.age / g.duration;
+                if (phase >= 1.f) { g.active = false; continue; }
+                const float window = 0.5f - 0.5f * std::cos(2.f * PI * phase);
+                wet += readTape(ch, static_cast<float>(writePos) - g.lag) * window;
+                windowSum += window;
+                g.lag = std::max(1.f, g.lag + 1.f - pitchRate * g.randomRate);
+                g.age += 1.f;
+            }
+            if (windowSum > 1e-5f) wet /= windowSum;
+            lastWet[ch] = limited(wet, -20.f, 20.f);
+            const float result = dry[ch] * (1.f - smoothMix) + wet * smoothMix;
             outputs[OUT_L_OUTPUT + ch].setVoltage(limited(result, -20.f, 20.f));
         }
         writePos = (writePos + 1) & (BUFFER_SIZE - 1);
@@ -282,15 +267,18 @@ struct DaisyWidget : ModuleWidget {
         setModule(module);
         setPanel(createPanel(asset::plugin(pluginInstance, "res/daisy.svg")));
 
-        // SVG viewBox is 144 x 364.252 units, rendered at 150 x 379.5 px (50.8 x 128.5 mm).
-        // All coordinates below are in SVG units, measured from the artwork and the
-        // jack placement mockup.
+        addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
+        addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
+        addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
+        addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
+
+        // 144 x 364.252 units rendered at 150 x 379.5 px
         constexpr float scale = 150.f / 144.f;
         auto at = [&](float x, float y) { return Vec(x * scale, y * scale); };
 
         constexpr float rowPitch = 28.f;
-        constexpr float knobX = 66.88f;   // centre of the printed rings
-        constexpr float knobY0 = 50.39f;  // centre of the first ring
+        constexpr float knobX = 66.88f;
+        constexpr float knobY0 = 50.39f; 
         constexpr float cvX = 20.81f;
         constexpr float cvY0 = 49.6f;
         for (int i = 0; i < Daisy::PARAMS_LEN; ++i) {
@@ -300,7 +288,6 @@ struct DaisyWidget : ModuleWidget {
                 at(cvX, cvY0 + rowPitch * i), module, Daisy::DELAY_CV_INPUT + i));
         }
 
-        // Input (light grey) and output (dark) boxes, under their printed L / R legends.
         constexpr float inY = 285.8f;
         constexpr float outY = 327.8f;
         addInput(createInputCentered<PJ301MPort>(at(24.84f, inY), module, Daisy::IN_L_INPUT));
