@@ -1,12 +1,12 @@
 {
   "slug": "coastal",
   "name": "coastal",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "license": "GPL-3.0-or-later",
   "brand": "coastal",
   "author": "Jules Cafiso",
   "authorEmail": "",
-  "authorUrl": "julius.cool",
+  "authorUrl": "https://julius.cool",
   "pluginUrl": "https://github.com/vista747/coastal",
   "manualUrl": "https://github.com/vista747/coastal#readme",
   "sourceUrl": "https://github.com/vista747/coastal",
@@ -19,7 +19,7 @@
       "name": "daisy",
       "description": "Stereo grain delay module with additional CV, based on Ableton Live's Grain Delay",
       "tags": [
-        "Delay", "Granular", "Stereo"
+        "Delay", "Granular", "Effect"
       ]
     }
   ]

@@ -234,6 +234,10 @@ struct Daisy : Module {
             staggerRight = false;
         }
 
+        // Normalise by the expected number of overlapping grains, not the instantaneous window
+        // sum. Dividing by the live sum boosts grain edges to full level and clicks at small sizes.
+        const float overlapGain = 1.f / std::max(1.f, duration / hop);
+
         for (int ch = 0; ch < 2; ++ch) {
             samplesToNext[ch] -= 1.f;
             if (samplesToNext[ch] <= 0.f) {
@@ -242,18 +246,16 @@ struct Daisy : Module {
             }
 
             float wet = 0.f;
-            float windowSum = 0.f;
             for (auto& g : grains[ch]) {
                 if (!g.active) continue;
                 const float phase = g.age / g.duration;
                 if (phase >= 1.f) { g.active = false; continue; }
                 const float window = 0.5f - 0.5f * std::cos(2.f * PI * phase);
                 wet += readTape(ch, static_cast<float>(writePos) - g.lag) * window;
-                windowSum += window;
                 g.lag = std::max(1.f, g.lag + 1.f - pitchRate * g.randomRate);
                 g.age += 1.f;
             }
-            if (windowSum > 1e-5f) wet /= windowSum;
+            wet *= overlapGain;
             lastWet[ch] = limited(wet, -20.f, 20.f);
             const float result = dry[ch] * (1.f - smoothMix) + wet * smoothMix;
             outputs[OUT_L_OUTPUT + ch].setVoltage(limited(result, -20.f, 20.f));
